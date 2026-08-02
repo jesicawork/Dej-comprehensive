@@ -345,7 +345,8 @@ async function storageSet(key, value){
 
 /* ============ shared password (同國小／高中資料庫: 29646498) ============ */
 const HUB_PASSWORD = '29646498';
-const state = { view: 'home', hubUnlocked: false, teachers: [], teacherSearch: '', teacherTierFilter: '全部', loaded: false, dashboard: {}, dashboardExpanded: {} };
+const HUB_UNLOCK_KEY = 'dyzw_hub_unlocked';
+const state = { view: 'home', hubUnlocked: sessionStorage.getItem(HUB_UNLOCK_KEY) === '1', teachers: [], teacherSearch: '', teacherTierFilter: '全部', loaded: false, dashboard: {}, rosterTier: null, rosterSearch: '' };
 
 const TIER_OPTIONS = ['國小','國中','高中'];
 const TIER_CLASS = { '國小':'el', '國中':'mid', '高中':'hi' };
@@ -356,14 +357,16 @@ const DATABASES = [
     desc: '日常學生管理、點名、試卷與課程影片，國小老師使用。',
     url: 'https://jesicawork.github.io/Dej-Elementary/',
     gasUrl: 'https://script.google.com/macros/s/AKfycbxZg_6JL5T34382BrIeI5n1E-uB33wp1w-xaw0sN-jXm6IwoY8NvikMRtmHewpcX6Ni/exec',
+    gradeOrder: ['G1','G2','G3','G4','G5','G6'],
     active: true },
   { key: 'mid', tag: 'Middle School', name: '國中資料庫', cls: 'mid',
     desc: '功能規劃與國小／高中一致，建議以高中版為模板建立。',
-    url: '', gasUrl: '', active: false },
+    url: '', gasUrl: '', gradeOrder: [], active: false },
   { key: 'hi', tag: 'High School', name: '高中資料庫', cls: 'hi',
     desc: '日常學生管理、點名、試卷與課程影片，高中老師使用。',
     url: 'https://jesicawork.github.io/Dayangwb/',
     gasUrl: 'https://script.google.com/macros/s/AKfycbyAvOsJzamjnyIs1_FlytDiUkm5TaG4rpb_7BXBUSXOsgUbxxyiV3ycPzKEuxU3pVaJiA/exec',
+    gradeOrder: ['高一','高二','高三','專一','專二','專三','專四','專五'],
     active: true }
 ];
 
@@ -456,10 +459,11 @@ function render(){
   else if(state.view === 'teachers') c.innerHTML = state.hubUnlocked ? renderTeachers() : renderLockScreen('teachers');
   else if(state.view === 'dashboard') {
     c.innerHTML = state.hubUnlocked ? renderDashboard() : renderLockScreen('dashboard');
-    if(state.hubUnlocked && state._prevView !== 'dashboard'){
+    if(state.hubUnlocked && state._prevView !== 'dashboard' && state._prevView !== 'roster'){
       refreshDashboard();
     }
   }
+  else if(state.view === 'roster') c.innerHTML = state.hubUnlocked ? renderTierRoster() : renderLockScreen('dashboard');
   state._prevView = state.view;
   bindEvents();
 }
@@ -600,7 +604,10 @@ function renderTeachers(){
   return `
     <div class="topbar">
       <div><p class="eyebrow">STAFF DIRECTORY</p><h2 class="page-title">教師檔案</h2></div>
-      <button class="btn ghost small" id="lock-hub-btn">🔒 鎖定</button>
+      <div style="display:flex; gap:8px;">
+        <button class="icon-btn" id="open-hub-settings" title="同步設定">⚙️</button>
+        <button class="btn ghost small" id="lock-hub-btn">🔒 鎖定</button>
+      </div>
     </div>
 
     <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:14px;">
@@ -733,6 +740,41 @@ function exportTeachersCsv(){
   downloadCsv(`教師名單_${todayLabel().replace(/[（）年月日]/g,'-').replace(/-$/,'')}.csv`, csv);
 }
 
+function openHubSettingsModal(){
+  const cloudOn = Backend.gasUrl && Backend.cloudReady;
+  const cloudSetButNotReady = Backend.gasUrl && !Backend.cloudReady;
+  const statusHtml = cloudOn
+    ? `<p class="sub" style="color:#3D8461;font-weight:700;">✅ 目前為雲端模式，教師檔案存在你的 Google 雲端硬碟，所有裝置看到同一份。</p>`
+    : cloudSetButNotReady
+      ? `<p class="sub" style="color:var(--danger);font-weight:700;">⚠️ 已設定雲端網址，但剛剛連線失敗，目前暫時使用本機資料。請確認網址與部署設定是否正確。</p>`
+      : `<p class="sub" style="color:var(--ink-soft);font-weight:700;">💻 目前為本機模式，教師檔案只存在這台裝置的瀏覽器裡，換裝置看不到。</p>`;
+  openModal(`
+    <h3>綜合資料庫同步設定</h3>
+    ${statusHtml}
+    <p class="sub">貼上你部署好的「綜合資料庫」專屬 Apps Script 網頁應用程式網址（跟國小／高中資料庫一樣的部署方式，但必須是另外新建的、獨立的一個專案），教師檔案就能跨裝置同步。</p>
+    <div class="field">
+      <label>Apps Script 網頁應用程式網址</label>
+      <input type="url" id="hub-gas-url" placeholder="https://script.google.com/macros/s/.../exec" value="${escapeHtml(Backend.gasUrl||'')}">
+    </div>
+    <p class="sub" style="margin-top:-6px;">留空並儲存＝改回本機模式。第一次連上雲端時，會直接讀取雲端現有的資料，本機原本的資料不會自動搬過去。</p>
+    <div class="modal-actions">
+      <button class="btn ghost" id="hub-settings-cancel">取消</button>
+      <button class="btn" id="hub-settings-save">儲存並套用</button>
+    </div>
+  `);
+  document.getElementById('hub-settings-cancel').onclick = closeModal;
+  document.getElementById('hub-settings-save').onclick = async ()=>{
+    const url = document.getElementById('hub-gas-url').value.trim();
+    localStorage.setItem(GAS_URL_KEY, url);
+    closeModal();
+    state.loaded = false;
+    render();
+    await loadAll();
+    render();
+    showToast(url ? '正在連線雲端後端…' : '已改回本機模式');
+  };
+}
+
 /* ============ DASHBOARD (跨年齡層儀表板) ============ */
 const ENROLL_COUNT_KEYS = ['在班','新生','退班'];
 
@@ -747,11 +789,7 @@ async function fetchTierSummary(gasUrl){
     const status = s.enrollStatus || '在班';
     if(Object.prototype.hasOwnProperty.call(counts, status)) counts[status]++;
   });
-  const papersBucket = (data.papers && data.papers.files) || {};
-  const paperCount = Object.values(papersBucket).reduce((sum, arr)=> sum + (Array.isArray(arr) ? arr.length : 0), 0);
-  const videosBucket = (data.videos && data.videos.items) || {};
-  const videoCount = Object.values(videosBucket).reduce((sum, arr)=> sum + (Array.isArray(arr) ? arr.length : 0), 0);
-  return { totalStudents: students.length, counts, paperCount, videoCount, students, fetchedAt: new Date().toISOString() };
+  return { totalStudents: students.length, counts, students, fetchedAt: new Date().toISOString() };
 }
 
 async function refreshDashboard(){
@@ -803,9 +841,8 @@ function renderDashboardTierCard(db){
     `;
   }
   const d = entry.data;
-  const expanded = !!state.dashboardExpanded[db.key];
   return `
-    <div class="db-card ${db.cls}">
+    <button class="db-card ${db.cls}" data-open-roster="${db.key}" style="cursor:pointer;text-align:left;font-family:inherit;">
       <div class="bar"></div>
       <span class="tag">${db.tag}</span>
       <h3>${db.name}</h3>
@@ -817,39 +854,18 @@ function renderDashboardTierCard(db){
           </div>
         `).join('')}
       </div>
-      <p style="font-size:12.5px;color:var(--ink-soft);margin:6px 0 0;">學生總數：${d.totalStudents}　・　試卷／檔案：${d.paperCount} 份　・　影片：${d.videoCount} 支</p>
-      <button class="btn ghost small" data-toggle-roster="${db.key}" style="align-self:flex-start;margin-top:4px;">${expanded ? '收合學生名單 ▲' : `查看${db.name.replace('資料庫','')}學生名單 ▼`}</button>
-      ${expanded ? renderMiniStudentList(d.students||[]) : ''}
-    </div>
-  `;
-}
-
-function renderMiniStudentList(students){
-  if(!students.length){
-    return `<p class="helper-note" style="margin-top:8px;">目前沒有學生資料。</p>`;
-  }
-  const sorted = [...students].sort((a,b)=> (a.zh||'').localeCompare(b.zh||'', 'zh-Hant'));
-  return `
-    <div style="max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;margin-top:8px;border-top:1px dashed var(--lavender-line);padding-top:8px;">
-      ${sorted.map(s=>`
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--lavender-bg);border-radius:8px;padding:7px 10px;font-size:12.5px;">
-          <span>${escapeHtml(s.zh||'（未填姓名）')}${s.en ? ` <span style="color:var(--ink-soft);">${escapeHtml(s.en)}</span>` : ''}</span>
-          <span style="color:var(--ink-soft);white-space:nowrap;">${escapeHtml(s.grade||'')}${s.grade?'・':''}${escapeHtml(s.enrollStatus||'在班')}</span>
-        </div>
-      `).join('')}
-    </div>
+      <div class="enter" style="margin-top:6px;">查看完整學生名單 →</div>
+    </button>
   `;
 }
 
 function renderDashboard(){
   const activeDbs = DATABASES.filter(db => db.active && db.gasUrl);
   const readyEntries = activeDbs.map(db => state.dashboard[db.key]).filter(e => e && e.status === 'ready');
-  const totals = { 在班:0, 新生:0, 退班:0, students:0, papers:0, videos:0 };
+  const totals = { 在班:0, 新生:0, 退班:0, students:0 };
   readyEntries.forEach(e=>{
     ENROLL_COUNT_KEYS.forEach(k=> totals[k] += e.data.counts[k]);
     totals.students += e.data.totalStudents;
-    totals.papers += e.data.paperCount;
-    totals.videos += e.data.videoCount;
   });
   return `
     <div class="topbar">
@@ -866,16 +882,71 @@ function renderDashboard(){
         <div class="stat-card"><div class="stat-num">${totals[k]}</div><div class="stat-label">全體${k}人數</div></div>
       `).join('')}
     </div>
-    <p class="helper-note" style="margin-top:-4px;">學生總數：${totals.students} 位　・　試卷／檔案共 ${totals.papers} 份　・　課程影片共 ${totals.videos} 支（僅計入已連線成功的資料庫）</p>
+    <p class="helper-note" style="margin-top:-4px;">學生總數：${totals.students} 位（僅計入已連線成功的資料庫）</p>
 
     <div class="section-label" style="margin-top:22px;">各年齡層資料庫</div>
     <div class="grid">
       ${DATABASES.map(db => renderDashboardTierCard(db)).join('')}
     </div>
 
-    <p class="helper-note">💡 這裡的數字是即時向國小／高中資料庫的 Apps Script 後端要來的（用現有的 <code>?action=getAll</code> 端點），不會另外存一份在綜合資料庫裡；每次打開這頁或按「重新整理」都會拿到最新資料。國中資料庫建置好、有 Apps Script 網址之後，只要把網址填進程式碼 DATABASES 清單裡 mid 那一筆的 gasUrl，這裡就會自動一起統計。</p>
+    <p class="helper-note">💡 點選任一年齡層卡片可以看到該年齡層完整、依年級排序的學生名單。這裡的數字是即時向國小／高中資料庫的 Apps Script 後端要來的（用現有的 <code>?action=getAll</code> 端點），不會另外存一份在綜合資料庫裡；每次打開這頁或按「重新整理」都會拿到最新資料。國中資料庫建置好、有 Apps Script 網址之後，只要把網址填進程式碼 DATABASES 清單裡 mid 那一筆的 gasUrl，這裡就會自動一起統計。</p>
   `;
 }
+
+/* ============ TIER ROSTER (依年級排序的完整學生名單) ============ */
+function renderTierRoster(){
+  const db = DATABASES.find(d => d.key === state.rosterTier);
+  if(!db){
+    return `<div class="empty-state"><span class="ic">🧑‍🎓</span>找不到這個年齡層。</div>`;
+  }
+  const entry = state.dashboard[db.key];
+  const backBtn = `<button class="btn ghost small" id="back-to-dashboard-btn">← 回儀表板</button>`;
+  if(!entry || entry.status !== 'ready'){
+    return `
+      <div class="topbar">
+        <div>${backBtn}<h2 class="page-title" style="margin-top:10px;">${db.name}學生名單</h2></div>
+      </div>
+      <p class="helper-note">${entry && entry.status === 'error' ? '資料連線失敗，請先回儀表板重新整理一次。' : '讀取中…'}</p>
+    `;
+  }
+  const students = entry.data.students || [];
+  const q = (state.rosterSearch || '').trim().toLowerCase();
+  const filtered = q ? students.filter(s => (s.zh||'').toLowerCase().includes(q) || (s.en||'').toLowerCase().includes(q)) : students;
+  const order = db.gradeOrder || [];
+  const groups = order.map(g => ({ label: g, list: filtered.filter(s => s.grade === g) })).filter(g => g.list.length);
+  const otherGrades = [...new Set(filtered.map(s => s.grade || '未分類').filter(g => !order.includes(g)))];
+  otherGrades.forEach(g => groups.push({ label: g, list: filtered.filter(s => (s.grade || '未分類') === g) }));
+
+  return `
+    <div class="topbar">
+      <div>
+        ${backBtn}
+        <h2 class="page-title" style="margin-top:10px;">${db.name}學生名單</h2>
+      </div>
+      <div style="font-size:13px;color:var(--ink-soft);align-self:flex-end;">共 ${filtered.length} 位${q ? `（符合搜尋，總數 ${students.length} 位）` : ''}</div>
+    </div>
+    <div class="toolbar">
+      <input type="text" id="roster-search" placeholder="搜尋姓名…" value="${escapeHtml(state.rosterSearch||'')}">
+    </div>
+    ${groups.length ? groups.map(grp => `
+      <div style="margin-top:20px;">
+        <div class="section-label">${escapeHtml(grp.label)}（${grp.list.length} 位）</div>
+        <div class="teacher-card-grid">
+          ${grp.list.map(s => `
+            <div class="teacher-card" style="cursor:default;">
+              <div class="tc-top">
+                <div class="tc-name">${escapeHtml(s.zh||'（未填姓名）')}${s.en ? ` <span style="font-weight:400;font-size:13px;color:var(--ink-soft);">${escapeHtml(s.en)}</span>` : ''}</div>
+              </div>
+              <div class="tc-meta">${escapeHtml(s.school||'')}</div>
+              <span class="tier-chip ${TIER_CLASS[db.key === 'el' ? '國小' : db.key === 'hi' ? '高中' : '國中'] || 'el'}" style="width:fit-content;">${escapeHtml(s.enrollStatus||'在班')}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `).join('') : `<div class="empty-state"><span class="ic">🧑‍🎓</span>沒有符合條件的學生。</div>`}
+  `;
+}
+
 
 /* ============ events ============ */
 function bindEvents(){
@@ -889,6 +960,7 @@ function bindEvents(){
     const tryUnlock = ()=>{
       if(pwInput.value === HUB_PASSWORD){
         state.hubUnlocked = true;
+        sessionStorage.setItem(HUB_UNLOCK_KEY, '1');
         render();
       } else {
         const err = document.getElementById('hub-password-error');
@@ -905,23 +977,39 @@ function bindEvents(){
   const lockBtn = document.getElementById('lock-hub-btn');
   if(lockBtn) lockBtn.addEventListener('click', ()=>{
     state.hubUnlocked = false;
+    sessionStorage.removeItem(HUB_UNLOCK_KEY);
     render();
     showToast('已重新鎖定');
   });
 
   const refreshDashboardBtn = document.getElementById('refresh-dashboard-btn');
   if(refreshDashboardBtn) refreshDashboardBtn.addEventListener('click', refreshDashboard);
-  document.querySelectorAll('[data-toggle-roster]').forEach(btn=>{
+  document.querySelectorAll('[data-open-roster]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
-      const key = btn.dataset.toggleRoster;
-      state.dashboardExpanded[key] = !state.dashboardExpanded[key];
+      state.rosterTier = btn.dataset.openRoster;
+      state.rosterSearch = '';
+      state.view = 'roster';
       render();
     });
+  });
+  const backToDashboardBtn = document.getElementById('back-to-dashboard-btn');
+  if(backToDashboardBtn) backToDashboardBtn.addEventListener('click', ()=>{
+    state.view = 'dashboard';
+    render();
+  });
+  const rosterSearchInput = document.getElementById('roster-search');
+  if(rosterSearchInput) rosterSearchInput.addEventListener('input', (e)=>{
+    state.rosterSearch = e.target.value;
+    render();
+    const el = document.getElementById('roster-search');
+    if(el){ el.focus(); el.selectionStart = el.selectionEnd = el.value.length; }
   });
 
   // teachers
   const addTeacherBtn = document.getElementById('add-teacher-btn');
   if(addTeacherBtn) addTeacherBtn.addEventListener('click', ()=> openTeacherModal());
+  const openHubSettingsBtn = document.getElementById('open-hub-settings');
+  if(openHubSettingsBtn) openHubSettingsBtn.addEventListener('click', openHubSettingsModal);
   const exportTeachersBtn = document.getElementById('export-teachers-csv-btn');
   if(exportTeachersBtn) exportTeachersBtn.addEventListener('click', exportTeachersCsv);
   const teacherSearchInput = document.getElementById('teacher-search');
