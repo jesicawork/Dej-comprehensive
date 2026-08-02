@@ -351,6 +351,17 @@ const state = { view: 'home', hubUnlocked: sessionStorage.getItem(HUB_UNLOCK_KEY
 const TIER_OPTIONS = ['國小','國中','高中'];
 const TIER_CLASS = { '國小':'el', '國中':'mid', '高中':'hi' };
 
+/* ============ per-tier student field configs (for editing from the hub) ============ */
+const EL_ENROLL_STATUS_OPTIONS = ['在班','新生','畢業生（銜接中）','轉出','退班'];
+const HI_ENROLL_STATUS_OPTIONS = ['在班','新生','轉出','退班'];
+const EL_SUBJECT_OPTIONS = ['國語','數學','英文','自然','社會','安親班'];
+const EL_PREV_SCORE_SUBJECTS = [
+  { key:'chinese', label:'國語' }, { key:'math', label:'數學' }, { key:'english', label:'英文' },
+  { key:'science', label:'自然' }, { key:'social', label:'社會' }
+];
+const HI_TRACK_OPTIONS = ['高中','高職','五專'];
+const HI_CLASS_PRESETS = ['G1','G2','G3','G4','G5','G6'];
+
 /* ============ known age-tier databases ============ */
 const DATABASES = [
   { key: 'el', tag: 'Elementary', name: '國小資料庫', cls: 'el',
@@ -933,7 +944,7 @@ function renderTierRoster(){
         <div class="section-label">${escapeHtml(grp.label)}（${grp.list.length} 位）</div>
         <div class="teacher-card-grid">
           ${grp.list.map(s => `
-            <div class="teacher-card" style="cursor:default;">
+            <div class="teacher-card" data-edit-student="${s.id}" data-tier="${db.key}" role="button" tabindex="0">
               <div class="tc-top">
                 <div class="tc-name">${escapeHtml(s.zh||'（未填姓名）')}${s.en ? ` <span style="font-weight:400;font-size:13px;color:var(--ink-soft);">${escapeHtml(s.en)}</span>` : ''}</div>
               </div>
@@ -944,8 +955,257 @@ function renderTierRoster(){
         </div>
       </div>
     `).join('') : `<div class="empty-state"><span class="ic">🧑‍🎓</span>沒有符合條件的學生。</div>`}
+    <p class="helper-note">💡 點選任一位學生可以編輯完整資料；儲存前會先重新向後端抓一次最新資料比對，如果同時間有人也改了同一位學生，會提醒你選擇要「覆蓋」還是「放棄我的修改」。</p>
   `;
 }
+
+/* ============ hub-side student editing (full fields, per-tier schema) ============ */
+async function fetchFreshStudents(gasUrl){
+  const res = await fetch(gasUrl + '?action=getAll');
+  const json = await res.json();
+  if(!json || !json.ok) throw new Error((json && json.error) || '後端回應異常');
+  return (json.data && json.data.students) || [];
+}
+async function writeStudentsBack(gasUrl, studentsArray){
+  await fetch(gasUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ action: 'set', key: 'students', value: studentsArray })
+  });
+}
+function recomputeTierCounts(students){
+  const counts = { '在班':0, '新生':0, '退班':0 };
+  students.forEach(s=>{
+    const status = s.enrollStatus || '在班';
+    if(Object.prototype.hasOwnProperty.call(counts, status)) counts[status]++;
+  });
+  return { totalStudents: students.length, counts, students };
+}
+
+function openHubStudentEdit(tierKey, studentId){
+  const db = DATABASES.find(d => d.key === tierKey);
+  const entry = state.dashboard[tierKey];
+  if(!db || !entry || entry.status !== 'ready'){ showToast('資料尚未載入完成','warn'); return; }
+  const student = (entry.data.students || []).find(s => s.id === studentId);
+  if(!student){ showToast('找不到這位學生的資料','warn'); return; }
+  const snapshot = JSON.parse(JSON.stringify(student)); // 開啟編輯當下的版本，用來偵測衝突
+
+  const bodyHtml = tierKey === 'el' ? buildElementaryEditFields(student, db) : buildHighSchoolEditFields(student, db);
+  openModal(`
+    <h3>編輯學生資料</h3>
+    <p class="sub">${db.name}・修改後按「儲存」即可更新（會先與最新資料比對）</p>
+    ${bodyHtml}
+    <div class="modal-actions">
+      <button class="btn ghost" id="hs-delete" style="color:var(--danger);margin-right:auto;">刪除學生</button>
+      <button class="btn ghost" id="hs-cancel">取消</button>
+      <button class="btn" id="hs-save">儲存</button>
+    </div>
+  `);
+  document.getElementById('hs-cancel').onclick = closeModal;
+
+  document.getElementById('hs-delete').onclick = ()=>{
+    confirmDialog(`確定要刪除「${student.zh||''}」的學生資料嗎？此操作無法復原。`, async ()=>{
+      try{
+        const fresh = await fetchFreshStudents(db.gasUrl);
+        const updated = fresh.filter(s => s.id !== studentId);
+        await writeStudentsBack(db.gasUrl, updated);
+        state.dashboard[tierKey].data = recomputeTierCounts(updated);
+        closeModal();
+        render();
+        showToast('學生資料已刪除');
+      }catch(e){
+        showToast('刪除失敗：' + (e.message || e), 'warn');
+      }
+    });
+  };
+
+  document.getElementById('hs-save').onclick = async ()=>{
+    const fields = tierKey === 'el' ? readElementaryEditFields() : readHighSchoolEditFields();
+    if(!fields.zh || !fields.zh.trim()){ showToast('請輸入中文姓名','warn'); return; }
+
+    let fresh;
+    try{
+      fresh = await fetchFreshStudents(db.gasUrl);
+    }catch(e){
+      showToast('無法連線後端，儲存已取消：' + (e.message || e), 'warn');
+      return;
+    }
+    const freshStudent = fresh.find(s => s.id === studentId);
+    const hasConflict = !freshStudent || JSON.stringify(freshStudent) !== JSON.stringify(snapshot);
+
+    const doSave = async (baseArray)=>{
+      const idx = baseArray.findIndex(s => s.id === studentId);
+      const merged = Object.assign({}, freshStudent || student, fields, { id: studentId });
+      if(idx >= 0) baseArray[idx] = merged; else baseArray.push(merged);
+      try{
+        await writeStudentsBack(db.gasUrl, baseArray);
+        state.dashboard[tierKey].data = recomputeTierCounts(baseArray);
+        closeModal();
+        render();
+        showToast('學生資料已更新');
+      }catch(e){
+        showToast('儲存失敗：' + (e.message || e), 'warn');
+      }
+    };
+
+    if(hasConflict){
+      openModal(`
+        <h3>資料已被更新過</h3>
+        <p class="sub" style="font-size:14px;color:var(--ink);margin-top:10px;line-height:1.6;">這位學生的資料在你編輯的期間，已經被其他裝置或人員修改（或刪除）過了。你可以選擇仍要用你剛剛編輯的內容覆蓋，或是放棄你的修改、改看最新版本。</p>
+        <div class="modal-actions">
+          <button class="btn ghost" id="conflict-reload">放棄我的修改，改看最新版本</button>
+          <button class="btn" id="conflict-overwrite" style="background:var(--danger);">仍要覆蓋，使用我的版本</button>
+        </div>
+      `);
+      document.getElementById('conflict-reload').onclick = ()=>{
+        state.dashboard[tierKey].data = recomputeTierCounts(fresh);
+        closeModal();
+        render();
+        showToast('已放棄你的修改，顯示最新資料');
+      };
+      document.getElementById('conflict-overwrite').onclick = ()=> doSave(fresh);
+    } else {
+      await doSave(fresh);
+    }
+  };
+}
+
+function buildElementaryEditFields(s, db){
+  const gradeOptions = db.gradeOrder || [];
+  const prevScores = Object.assign({}, ...EL_PREV_SCORE_SUBJECTS.map(p=>({[p.key]:{mid:'',final:''}})), s.prevScores||{});
+  return `
+    <div class="field-row">
+      <div class="field"><label>學生編號</label><input type="text" id="hs-studentno" value="${escapeHtml(s.studentNo||'')}"></div>
+      <div class="field">
+        <label>在班狀態</label>
+        <select id="hs-enroll-status">${EL_ENROLL_STATUS_OPTIONS.map(o=>`<option ${s.enrollStatus===o?'selected':''}>${o}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="field"><label>狀態異動日期</label><input type="date" id="hs-enroll-date" value="${escapeHtml(s.enrollStatusDate||'')}"></div>
+    <div class="field-row">
+      <div class="field"><label>中文姓名 *</label><input type="text" id="hs-zh" value="${escapeHtml(s.zh||'')}"></div>
+      <div class="field"><label>英文姓名</label><input type="text" id="hs-en" value="${escapeHtml(s.en||'')}"></div>
+    </div>
+    <div class="field"><label>就讀學校</label><input type="text" id="hs-school" value="${escapeHtml(s.school||'')}"></div>
+    <div class="field-row">
+      <div class="field"><label>身分證字號</label><input type="text" id="hs-idnumber" maxlength="10" value="${escapeHtml(s.idNumber||'')}"></div>
+      <div class="field">
+        <label>就讀年級</label>
+        <select id="hs-grade">${gradeOptions.map(g=>`<option ${s.grade===g?'selected':''}>${g}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="field">
+      <label>補習科目（可複選）</label>
+      <div class="checkbox-group">
+        ${EL_SUBJECT_OPTIONS.map(sub=>`<label><input type="checkbox" name="hs-subject" value="${sub}" ${(s.subjects||[]).includes(sub)?'checked':''}> ${sub}</label>`).join('')}
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>生日</label><input type="date" id="hs-birthday" value="${escapeHtml(s.birthday||'')}"></div>
+      <div class="field"><label>學生電話</label><input type="tel" id="hs-phone" value="${escapeHtml(s.phone||'')}"></div>
+    </div>
+    <div class="field"><label>家長電話</label><input type="tel" id="hs-parent-phone" value="${escapeHtml(s.parentPhone||'')}"></div>
+    <div class="field"><label>備註</label><input type="text" id="hs-note" value="${escapeHtml(s.note||'')}"></div>
+    <details class="prev-score-details" style="margin-top:6px;">
+      <summary style="cursor:pointer;font-size:13px;font-weight:700;color:var(--purple-deep);">入班先備成績（選填）</summary>
+      <div style="display:grid;grid-template-columns:64px 1fr 1fr;gap:8px 10px;align-items:center;margin-top:8px;">
+        <div></div><div style="font-size:11px;color:var(--ink-soft);text-align:center;">期中</div><div style="font-size:11px;color:var(--ink-soft);text-align:center;">期末</div>
+        ${EL_PREV_SCORE_SUBJECTS.map(p=>`
+          <div style="font-size:12px;font-weight:700;color:var(--ink-soft);">${p.label}</div>
+          <input type="number" min="0" max="100" id="hs-prev-${p.key}-mid" value="${escapeHtml(prevScores[p.key].mid||'')}">
+          <input type="number" min="0" max="100" id="hs-prev-${p.key}-final" value="${escapeHtml(prevScores[p.key].final||'')}">
+        `).join('')}
+      </div>
+    </details>
+  `;
+}
+function readElementaryEditFields(){
+  const prevScores = {};
+  EL_PREV_SCORE_SUBJECTS.forEach(p=>{
+    prevScores[p.key] = {
+      mid: document.getElementById(`hs-prev-${p.key}-mid`).value.trim(),
+      final: document.getElementById(`hs-prev-${p.key}-final`).value.trim()
+    };
+  });
+  return {
+    studentNo: document.getElementById('hs-studentno').value.trim(),
+    enrollStatus: document.getElementById('hs-enroll-status').value,
+    enrollStatusDate: document.getElementById('hs-enroll-date').value,
+    zh: document.getElementById('hs-zh').value.trim(),
+    en: document.getElementById('hs-en').value.trim(),
+    school: document.getElementById('hs-school').value.trim(),
+    idNumber: document.getElementById('hs-idnumber').value.trim().toUpperCase(),
+    grade: document.getElementById('hs-grade').value,
+    subjects: Array.from(document.querySelectorAll('input[name="hs-subject"]:checked')).map(el=>el.value),
+    birthday: document.getElementById('hs-birthday').value,
+    phone: document.getElementById('hs-phone').value.trim(),
+    parentPhone: document.getElementById('hs-parent-phone').value.trim(),
+    note: document.getElementById('hs-note').value.trim(),
+    prevScores
+  };
+}
+
+function buildHighSchoolEditFields(s, db){
+  const gradeOptions = db.gradeOrder || [];
+  return `
+    <div class="field-row">
+      <div class="field"><label>學生編號</label><input type="text" id="hs-studentno" value="${escapeHtml(s.studentNo||'')}"></div>
+      <div class="field">
+        <label>在班狀態</label>
+        <select id="hs-enroll-status">${HI_ENROLL_STATUS_OPTIONS.map(o=>`<option ${s.enrollStatus===o?'selected':''}>${o}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="field"><label>狀態異動日期</label><input type="date" id="hs-enroll-date" value="${escapeHtml(s.enrollStatusDate||'')}"></div>
+    <div class="field-row">
+      <div class="field"><label>中文姓名 *</label><input type="text" id="hs-zh" value="${escapeHtml(s.zh||'')}"></div>
+      <div class="field"><label>英文姓名</label><input type="text" id="hs-en" value="${escapeHtml(s.en||'')}"></div>
+    </div>
+    <div class="field"><label>就讀學校</label><input type="text" id="hs-school" value="${escapeHtml(s.school||'')}"></div>
+    <div class="field-row">
+      <div class="field">
+        <label>就讀管道</label>
+        <select id="hs-track">${HI_TRACK_OPTIONS.map(t=>`<option ${s.track===t?'selected':''}>${t}</option>`).join('')}</select>
+      </div>
+      <div class="field">
+        <label>就讀年級</label>
+        <select id="hs-grade">${gradeOptions.map(g=>`<option ${s.grade===g?'selected':''}>${g}</option>`).join('')}</select>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>班級</label>
+        <input type="text" id="hs-classname" list="hs-class-options" value="${escapeHtml(s.className||'')}">
+        <datalist id="hs-class-options">${HI_CLASS_PRESETS.map(c=>`<option value="${c}">`).join('')}</datalist>
+      </div>
+      <div class="field"><label>選修科目</label><input type="text" id="hs-subjects" placeholder="以逗號分隔" value="${escapeHtml((s.subjects||[]).join(', '))}"></div>
+    </div>
+    <div class="field-row">
+      <div class="field"><label>生日</label><input type="date" id="hs-birthday" value="${escapeHtml(s.birthday||'')}"></div>
+      <div class="field"><label>學生電話</label><input type="tel" id="hs-phone" value="${escapeHtml(s.phone||'')}"></div>
+    </div>
+    <div class="field"><label>家長電話</label><input type="tel" id="hs-parent-phone" value="${escapeHtml(s.parentPhone||'')}"></div>
+    <div class="field"><label>備註</label><input type="text" id="hs-note" value="${escapeHtml(s.note||'')}"></div>
+  `;
+}
+function readHighSchoolEditFields(){
+  return {
+    studentNo: document.getElementById('hs-studentno').value.trim(),
+    enrollStatus: document.getElementById('hs-enroll-status').value,
+    enrollStatusDate: document.getElementById('hs-enroll-date').value,
+    zh: document.getElementById('hs-zh').value.trim(),
+    en: document.getElementById('hs-en').value.trim(),
+    school: document.getElementById('hs-school').value.trim(),
+    track: document.getElementById('hs-track').value,
+    grade: document.getElementById('hs-grade').value,
+    className: document.getElementById('hs-classname').value.trim(),
+    subjects: document.getElementById('hs-subjects').value.split(',').map(x=>x.trim()).filter(Boolean),
+    birthday: document.getElementById('hs-birthday').value,
+    phone: document.getElementById('hs-phone').value.trim(),
+    parentPhone: document.getElementById('hs-parent-phone').value.trim(),
+    note: document.getElementById('hs-note').value.trim()
+  };
+}
+
 
 
 /* ============ events ============ */
@@ -1003,6 +1263,10 @@ function bindEvents(){
     render();
     const el = document.getElementById('roster-search');
     if(el){ el.focus(); el.selectionStart = el.selectionEnd = el.value.length; }
+  });
+  document.querySelectorAll('[data-edit-student]').forEach(card=>{
+    card.addEventListener('click', ()=> openHubStudentEdit(card.dataset.tier, card.dataset.editStudent));
+    card.addEventListener('keydown', (e)=>{ if(e.key==='Enter' || e.key===' '){ e.preventDefault(); card.click(); } });
   });
 
   // teachers
