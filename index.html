@@ -345,7 +345,7 @@ async function storageSet(key, value){
 
 /* ============ shared password (同國小／高中資料庫: 29646498) ============ */
 const HUB_PASSWORD = '29646498';
-const state = { view: 'home', hubUnlocked: false, teachers: [], teacherSearch: '', teacherTierFilter: '全部', loaded: false, dashboard: {} };
+const state = { view: 'home', hubUnlocked: false, teachers: [], teacherSearch: '', teacherTierFilter: '全部', loaded: false, dashboard: {}, dashboardExpanded: {} };
 
 const TIER_OPTIONS = ['國小','國中','高中'];
 const TIER_CLASS = { '國小':'el', '國中':'mid', '高中':'hi' };
@@ -452,14 +452,15 @@ function render(){
     return;
   }
   if(state.view === 'home') c.innerHTML = renderHome();
-  else if(state.view === 'hub') c.innerHTML = state.hubUnlocked ? renderHub() : renderLockScreen('hub');
+  else if(state.view === 'hub') c.innerHTML = renderHub();
   else if(state.view === 'teachers') c.innerHTML = state.hubUnlocked ? renderTeachers() : renderLockScreen('teachers');
   else if(state.view === 'dashboard') {
     c.innerHTML = state.hubUnlocked ? renderDashboard() : renderLockScreen('dashboard');
-    if(state.hubUnlocked && Object.keys(state.dashboard).length === 0){
+    if(state.hubUnlocked && state._prevView !== 'dashboard'){
       refreshDashboard();
     }
   }
+  state._prevView = state.view;
   bindEvents();
 }
 
@@ -511,7 +512,6 @@ function renderHub(){
   return `
     <div class="topbar">
       <div><p class="eyebrow">ENTRY PORTAL</p><h2 class="page-title">綜合資料庫入口導覽</h2></div>
-      <button class="btn ghost small" id="lock-hub-btn">🔒 鎖定</button>
     </div>
 
     <div class="hub-wrap">
@@ -751,7 +751,7 @@ async function fetchTierSummary(gasUrl){
   const paperCount = Object.values(papersBucket).reduce((sum, arr)=> sum + (Array.isArray(arr) ? arr.length : 0), 0);
   const videosBucket = (data.videos && data.videos.items) || {};
   const videoCount = Object.values(videosBucket).reduce((sum, arr)=> sum + (Array.isArray(arr) ? arr.length : 0), 0);
-  return { totalStudents: students.length, counts, paperCount, videoCount, fetchedAt: new Date().toISOString() };
+  return { totalStudents: students.length, counts, paperCount, videoCount, students, fetchedAt: new Date().toISOString() };
 }
 
 async function refreshDashboard(){
@@ -803,6 +803,7 @@ function renderDashboardTierCard(db){
     `;
   }
   const d = entry.data;
+  const expanded = !!state.dashboardExpanded[db.key];
   return `
     <div class="db-card ${db.cls}">
       <div class="bar"></div>
@@ -817,6 +818,25 @@ function renderDashboardTierCard(db){
         `).join('')}
       </div>
       <p style="font-size:12.5px;color:var(--ink-soft);margin:6px 0 0;">學生總數：${d.totalStudents}　・　試卷／檔案：${d.paperCount} 份　・　影片：${d.videoCount} 支</p>
+      <button class="btn ghost small" data-toggle-roster="${db.key}" style="align-self:flex-start;margin-top:4px;">${expanded ? '收合學生名單 ▲' : `查看${db.name.replace('資料庫','')}學生名單 ▼`}</button>
+      ${expanded ? renderMiniStudentList(d.students||[]) : ''}
+    </div>
+  `;
+}
+
+function renderMiniStudentList(students){
+  if(!students.length){
+    return `<p class="helper-note" style="margin-top:8px;">目前沒有學生資料。</p>`;
+  }
+  const sorted = [...students].sort((a,b)=> (a.zh||'').localeCompare(b.zh||'', 'zh-Hant'));
+  return `
+    <div style="max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;margin-top:8px;border-top:1px dashed var(--lavender-line);padding-top:8px;">
+      ${sorted.map(s=>`
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;background:var(--lavender-bg);border-radius:8px;padding:7px 10px;font-size:12.5px;">
+          <span>${escapeHtml(s.zh||'（未填姓名）')}${s.en ? ` <span style="color:var(--ink-soft);">${escapeHtml(s.en)}</span>` : ''}</span>
+          <span style="color:var(--ink-soft);white-space:nowrap;">${escapeHtml(s.grade||'')}${s.grade?'・':''}${escapeHtml(s.enrollStatus||'在班')}</span>
+        </div>
+      `).join('')}
     </div>
   `;
 }
@@ -891,6 +911,13 @@ function bindEvents(){
 
   const refreshDashboardBtn = document.getElementById('refresh-dashboard-btn');
   if(refreshDashboardBtn) refreshDashboardBtn.addEventListener('click', refreshDashboard);
+  document.querySelectorAll('[data-toggle-roster]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const key = btn.dataset.toggleRoster;
+      state.dashboardExpanded[key] = !state.dashboardExpanded[key];
+      render();
+    });
+  });
 
   // teachers
   const addTeacherBtn = document.getElementById('add-teacher-btn');
